@@ -75,6 +75,31 @@
   .craftBtn:hover:not(:disabled) { background: #4aa34a; }
   .craftBtn:disabled { background: #4a5868; box-shadow: 0 2px 0 #38434f; color: #8595a5; cursor: default; }
 
+  /* Dev / creative panel */
+  #devOverlay {
+    position: fixed; inset: 0; background: rgba(10, 18, 28, 0.6); z-index: 16;
+    display: none; align-items: center; justify-content: center;
+  }
+  #devPanel {
+    background: rgba(20, 30, 44, 0.95); border: 2px solid #8a6a4a; border-radius: 10px;
+    padding: 22px 26px; box-shadow: 0 18px 60px rgba(0,0,0,0.6); max-width: 470px;
+  }
+  #devPanel h2 { color: #fff; margin: 0 0 12px; font-size: 18px; letter-spacing: 2px; text-align: center; }
+  #devPanel .slot { pointer-events: auto; cursor: pointer; }
+  #devPanel .slot:hover { border-color: #e0b86a; }
+  #devDivider { height: 2px; background: #8a6a4a; margin: 12px 0; border-radius: 1px; }
+  .devRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .devNote { color: #8aa0b5; font-size: 11px; }
+  .devBtn {
+    font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer;
+    padding: 6px 12px; color: #fff; background: #4a5868; border: 0; border-radius: 4px;
+    box-shadow: 0 2px 0 #38434f;
+  }
+  .devBtn:hover { background: #5a6a7c; }
+  #creativeToggle.on { background: #3f8f3f; box-shadow: 0 2px 0 #2a5f2a; }
+  .spawnBtn { background: #9c5246; box-shadow: 0 2px 0 #6e3a32; }
+  .spawnBtn:hover { background: #b35e50; }
+
   /* HUD info */
   #info {
     position: fixed; top: 10px; left: 10px; color: #fff; font-size: 12px;
@@ -213,6 +238,30 @@
   </div>
 </div>
 
+<div id="devOverlay">
+  <div id="devPanel">
+    <h2>DEV / CREATIVE</h2>
+    <div class="devRow">
+      <button id="creativeToggle" class="devBtn">CREATIVE: OFF</button>
+      <button id="aggroToggle" class="devBtn">MOB AGGRO: ON</button>
+      <button id="freezeToggle" class="devBtn">FREEZE TIME: OFF</button>
+    </div>
+    <div class="devNote" style="margin-top:6px;">creative = free crafting + no damage &middot; aggro off = mobs ignore you &middot; freeze = pause day/night, world stays live</div>
+    <div id="devDivider"></div>
+    <h2 style="font-size:13px;">GIVE ITEMS</h2>
+    <div class="invGrid" id="giveGrid"></div>
+    <div id="devDivider"></div>
+    <h2 style="font-size:13px;">SPAWN ENEMY</h2>
+    <div class="devRow" id="spawnRow">
+      <button class="devBtn spawnBtn" data-type="walker">Walker</button>
+      <button class="devBtn spawnBtn" data-type="runner">Runner</button>
+      <button class="devBtn spawnBtn" data-type="brute">Brute</button>
+      <button class="devBtn spawnBtn" data-type="spitter">Spitter</button>
+    </div>
+    <div id="invHint">Click an item to add a stack &nbsp;·&nbsp; ` to close</div>
+  </div>
+</div>
+
 <div id="overlay">
   <div id="panel">
     <h1>VOXELCRAFT</h1>
@@ -234,6 +283,7 @@
       <tr><td>N</td><td>skip day / cleared night</td></tr>
       <tr><td>[ and ]</td><td>render distance</td></tr>
       <tr><td>R</td><td>restart run</td></tr>
+      <tr><td>`</td><td>dev / creative menu</td></tr>
     </table>
     <button id="playBtn">PLAY</button>
     <div id="hint">Press Esc anytime to release the mouse</div>
@@ -557,6 +607,44 @@ function torchLightAt(px, py, pz) {
   return best;
 }
 
+// ---------- block durability ----------
+// Walls have HP that is shared between zombies and persists across hits, so a
+// horde chips a wall down together instead of each zombie starting from scratch.
+const BLOCK_HP_DEFAULT = 60;
+const BLOCK_HP = {
+  [BRICK]: 500,                                      // sturdiest — earns its craft
+  [STONE]: 250, [COAL_ORE]: 150, [IRON_ORE]: 150, [SULFUR_ORE]: 150,
+  [TURRET]: 250,
+  [LOG]: 100, [PLANK]: 100,                            // wood: equal, on purpose
+  [DIRT]: 60, [GRASS]: 60,
+  [SAND]: 45, [CACTUS]: 40, [LEAF]: 25,
+};
+const blockToughness = id => BLOCK_HP[id] ?? BLOCK_HP_DEFAULT;
+
+const blockHP = new Map();                           // "x,y,z" -> {id, hp, cd}, only while damaged
+
+// chip away at a block; returns true if this hit broke it
+function damageBlock(x, y, z, dmg) {
+  const id = getBlock(x, y, z);
+  const k = x + ',' + y + ',' + z;
+  let e = blockHP.get(k);
+  if (!e || e.id !== id) { e = { id, hp: blockToughness(id), cd: 0 }; blockHP.set(k, e); }
+  e.hp -= dmg;
+  e.cd = 2;                                          // hold off regen for 2s after the last hit
+  if (e.hp <= 0) { blockHP.delete(k); setBlock(x, y, z, AIR); return true; }
+  return false;
+}
+
+// walls left alone slowly knit back together (this also self-cleans the map)
+function updateBlockHP(dt) {
+  for (const [k, e] of blockHP) {
+    if (e.cd > 0) { e.cd -= dt; continue; }
+    const [x, y, z] = k.split(',').map(Number);
+    e.hp += 24 * dt;
+    if (getBlock(x, y, z) !== e.id || e.hp >= blockToughness(e.id)) blockHP.delete(k);
+  }
+}
+
 function setBlock(x, y, z, b) {
   if (y < 1 || y >= WY) return;
   const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
@@ -565,6 +653,7 @@ function setBlock(x, y, z, b) {
   const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
   const i = lidx(lx, y, lz), old = c[i];
   c[i] = b;
+  blockHP.delete(x + ',' + y + ',' + z);             // any change resets durability tracking
 
   if (old === TORCH && b !== TORCH) {
     const k = torches.findIndex(t => t.x === x && t.y === y && t.z === z);
@@ -1300,7 +1389,8 @@ addEventListener('keydown', e => {
     if (n >= 0 && n < inv.hotbar.length) { selected = n; renderHotbar(); }
   }
   if (e.code === 'KeyE' && !dead && (locked || invOpen)) toggleInventory();
-  if (e.code === 'KeyN' && locked && !dead && gameState === 'playing' && !ffActive) {
+  if (e.code === 'Backquote' && !dead && (locked || devOpen)) toggleDev();
+  if (e.code === 'KeyN' && locked && !dead && gameState === 'playing' && !ffActive && !freezeTime) {
     if (!isNight() || nightCleared()) { ffActive = true; ffWasNight = isNight(); }
   }
   if (e.code === 'KeyR' && locked) {
@@ -1320,11 +1410,11 @@ addEventListener('wheel', e => {
 
 const overlay = document.getElementById('overlay');
 document.getElementById('playBtn').addEventListener('click', () => canvas.requestPointerLock());
-canvas.addEventListener('click', () => { if (!locked && !dead && !invOpen && gameState !== 'gameover') canvas.requestPointerLock(); });
+canvas.addEventListener('click', () => { if (!locked && !dead && !invOpen && !devOpen && gameState !== 'gameover') canvas.requestPointerLock(); });
 
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
-  overlay.style.display = (locked || dead || invOpen || gameState === 'gameover') ? 'none' : 'flex';
+  overlay.style.display = (locked || dead || invOpen || devOpen || gameState === 'gameover') ? 'none' : 'flex';
 });
 
 document.addEventListener('mousemove', e => {
@@ -1500,7 +1590,12 @@ function step(dt) {
   if (swim) {
     player.vel.y -= 14 * dt;
     player.vel.y = Math.max(player.vel.y, -3.4);
-    if (keys.Space) player.vel.y = Math.min(player.vel.y + 36 * dt, 4.2);
+    if (keys.Space) {
+      const waterY = Math.floor(player.pos.y + 0.4);
+      const atSurface = getBlock(Math.floor(player.pos.x), waterY + 1, Math.floor(player.pos.z)) !== WATER;
+      if (atSurface) { player.vel.y = 8.6; }
+      else player.vel.y = Math.min(player.vel.y + 36 * dt, 4.2);
+    }
   } else {
     player.vel.y -= 26 * dt;
     player.vel.y = Math.max(player.vel.y, -50);
@@ -1597,7 +1692,7 @@ function newRun() {
   seed = Math.random() * 10000;
   resetWorld();
   clearZombies(); clearDrops(); clearProjectiles(); clearTurrets(); clearFX();
-  leafDecay.clear();
+  leafDecay.clear(); blockHP.clear();
   unlocked.mountain = false; unlocked.desert = false;
   inv.hotbar.fill(null); inv.bag.fill(null);
   inv.hotbar[0] = { id: CORE, n: 1 };
@@ -1642,7 +1737,7 @@ function renderHearts() {
 }
 
 function damagePlayer(dmg, fromPos) {
-  if (dead) return;
+  if (dead || creative) return;
   hp -= dmg;
   lastHurtAt = performance.now() / 1000;
   vignetteA = 0.9;
@@ -1659,6 +1754,7 @@ function damagePlayer(dmg, fromPos) {
 function die() {
   dead = true;
   if (invOpen) { invOpen = false; picked = null; document.getElementById('invOverlay').style.display = 'none'; }
+  if (devOpen) { devOpen = false; document.getElementById('devOverlay').style.display = 'none'; }
   if (gameState === 'playing' && basePos) {
     respawnT = 5;                        // the horde keeps attacking while you're down
     document.getElementById('respawnMsg').textContent = 'Respawning in 5';
@@ -1674,16 +1770,16 @@ const Z_CFG = { W: 0.3, H: 1.8 };          // base physique; stats live on the t
 
 const ZTYPES = {
   walker: { hp: 20, hpN: 4, dmg: 3, baseDmg: 4, atkCd: 1.0, walk: 1.7, chase: 3.4,
-            dig: 2.2, kb: 1.0, drops: [1, 2], scale: [1, 1, 1],
+            digPower: 45, kb: 1.0, drops: [1, 2], scale: [1, 1, 1],
             skin: 0x4f9e43, shirt: 0x3b7ba0, pants: 0x4a3f7a, eye: 0x16240f },
   runner: { hp: 12, hpN: 2, dmg: 2, baseDmg: 3, atkCd: 0.65, walk: 2.6, chase: 5.6,
-            dig: 4.5, kb: 1.35, drops: [1, 1], scale: [0.85, 0.92, 0.85],
+            digPower: 22, kb: 1.35, drops: [1, 1], scale: [0.85, 0.92, 0.85],
             skin: 0xa8b85a, shirt: 0x7a2e2e, pants: 0x4a3a2a, eye: 0x1f1408 },
   brute:  { hp: 55, hpN: 8, dmg: 6, baseDmg: 9, atkCd: 1.4, walk: 1.1, chase: 2.0,
-            dig: 1.1, kb: 0.35, drops: [2, 4], scale: [1.32, 1.22, 1.32],
+            digPower: 80, kb: 0.35, drops: [2, 4], scale: [1.32, 1.22, 1.32],
             skin: 0x3f7a36, shirt: 0x3d3d44, pants: 0x2e2e35, eye: 0x8a1f1f },
   spitter:{ hp: 16, hpN: 3, dmg: 2, baseDmg: 3, atkCd: 1.2, walk: 1.6, chase: 3.0,
-            dig: 3.5, kb: 1.1, drops: [1, 1], scale: [0.92, 1.05, 0.92],
+            digPower: 28, kb: 1.1, drops: [1, 1], scale: [0.92, 1.05, 0.92],
             skin: 0x8fa83a, shirt: 0x55663a, pants: 0x3a4528, eye: 0xc8d84a,
             ranged: true, spitEvery: 2.6, spitDmg: 3,
             extraDrop: { id: ARROW, n: 2, p: 0.5 } },
@@ -1797,6 +1893,8 @@ function moveZombie(z, mx, mz, speed, dt) {
     z.vel.y = Math.max(z.vel.y - 12 * dt, -2.5);
     z.vel.y += 26 * dt;                      // zombies bob up to keep walking out
     z.vel.y = Math.min(z.vel.y, 3.5);
+    // scrambling against a bank: climb hard enough to clear the lip onto land
+    if (z.bumped && (mx || mz)) z.vel.y = 5.5;
   } else {
     z.vel.y = Math.max(z.vel.y - 26 * dt, -50);
   }
@@ -1815,8 +1913,8 @@ function moveZombie(z, mx, mz, speed, dt) {
   } else if (Math.abs(v.y) > 0.01) z.onGround = false;
 
   z.bumped = bumped;
-  // auto-jump up one-block steps when chasing into a wall
-  if (bumped && z.onGround && (mx || mz)) { v.y = 8.2; z.onGround = false; }
+  // auto-jump one-block steps when chasing into a wall — but not while clawing through a tall wall
+  if (bumped && z.onGround && (mx || mz) && !z.digging) { v.y = 8.2; z.onGround = false; }
 }
 
 let waveLeft = 0, waveTimer = 0, wasNight = false;
@@ -1906,13 +2004,13 @@ function updateZombies(dt) {
     z.attackCd -= dt;
     let mx = 0, mz = 0, speed = z.type.walk;
     const dy = player.pos.y - z.pos.y;
-    const playerNear = !dead && dist < 12 && Math.abs(dy) < 6;
+    const playerNear = mobAggro && !dead && dist < 12 && Math.abs(dy) < 6;
 
     if (z.type.ranged) {
       // spitter: keep distance and lob at the player, or bombard the core
       z.spitCd = (z.spitCd || 0) - dt;
       let tp = null, tIsPlayer = false;
-      if (!dead && dist < 18 && Math.abs(dy) < 10) {
+      if (mobAggro && !dead && dist < 18 && Math.abs(dy) < 10) {
         tp = { x: player.pos.x, y: player.pos.y + 1.0, z: player.pos.z };
         tIsPlayer = true;
       } else if (basePos && bDist < 15) {
@@ -1986,22 +2084,18 @@ function updateZombies(dt) {
     }
     if (z.dying) continue;
 
-    // ----- dig through walls blocking the way to the target -----
+    // ----- break through walls: chip the shared block HP, then hop the leftover step -----
     z.digging = false;
     if (z.bumped && (mx || mz) && !z.burning) {
       const bx = Math.floor(z.pos.x + mx * 0.8), bz2 = Math.floor(z.pos.z + mz * 0.8);
-      const feetY = Math.floor(z.pos.y + 0.3), headY = Math.floor(z.pos.y + 1.3);
-      let ty = null;     // head-height first: one dig + a hop clears a 2-high wall
-      if (isSolid(getBlock(bx, headY, bz2)) && getBlock(bx, headY, bz2) !== CORE) ty = headY;
-      else if (isSolid(getBlock(bx, feetY, bz2)) && getBlock(bx, feetY, bz2) !== CORE) ty = feetY;
-      if (ty !== null) {
-        const dk = bx + ',' + ty + ',' + bz2;
-        if (z.digKey !== dk) { z.digKey = dk; z.digT = 0; }
-        z.digT += dt; z.digging = true;
-        if (z.digT > z.type.dig) { setBlock(bx, ty, bz2, AIR); z.digKey = null; z.digT = 0; }
+      const headY = Math.floor(z.pos.y + 1.3);
+      const head = getBlock(bx, headY, bz2);
+      if (isSolid(head) && head !== CORE) {     // a wall too tall to step over → claw through it
+        z.digging = true;                       // suppresses the auto-hop until it breaks
+        damageBlock(bx, headY, bz2, z.type.digPower * dt);
       }
+      // a head-height gap with only a feet-height block left is a 1-high step: let the hop handle it
     }
-    if (!z.digging) { z.digT = 0; z.digKey = null; }
 
     // ----- animation -----
     const moving = Math.hypot(z.vel.x, z.vel.z) > 0.3;
@@ -2142,12 +2236,12 @@ function takeItems(id, n) {
     }
 }
 
-const canCraft = r => r.ins.every(g => countItem(g.id) >= g.n);
+const canCraft = r => creative || r.ins.every(g => countItem(g.id) >= g.n);
 
 function craft(ri) {
   const r = RECIPES[ri];
   if (!canCraft(r)) return;
-  r.ins.forEach(g => takeItems(g.id, g.n));
+  if (!creative) r.ins.forEach(g => takeItems(g.id, g.n));
   const left = addItem(r.out.id, r.out.n);
   if (left) spawnDrop(player.pos.x, player.pos.y + 1, player.pos.z, r.out.id, left); // inventory full
   renderInventory(); renderHotbar();
@@ -2529,6 +2623,89 @@ function toggleInventory() {
   else canvas.requestPointerLock();
 }
 
+// ---------- dev / creative panel ----------
+let creative = false, devOpen = false, mobAggro = true, freezeTime = false;
+
+// everything you can hand yourself: blocks first, then items/tools
+const GIVE_LIST = [
+  GRASS, DIRT, STONE, SAND, LOG, LEAF, PLANK, BRICK, TORCH,
+  COAL_ORE, IRON_ORE, SULFUR_ORE, CACTUS, WATER, CORE, TURRET,
+  STICK, COAL, IRON, SULFUR, FLESH, ARROW, BOMB,
+  SWORD_W, SWORD_S, SWORD_I, BOW,
+];
+
+function renderGiveGrid() {
+  document.getElementById('giveGrid').innerHTML = GIVE_LIST.map(id =>
+    `<div class="slot" data-id="${id}">
+       <div class="swatch" style="background-image:url('${iconFor(id)}')"></div>
+       <span class="name">${itemInfo(id).name}</span>
+     </div>`).join('');
+}
+
+// green "on" highlight reflects each toggle's boolean (aggro starts on)
+function updateToggleBtns() {
+  const set = (elId, label, on) => {
+    const b = document.getElementById(elId);
+    b.textContent = label + ': ' + (on ? 'ON' : 'OFF');
+    b.classList.toggle('on', on);
+  };
+  set('creativeToggle', 'CREATIVE', creative);
+  set('aggroToggle',    'MOB AGGRO', mobAggro);
+  set('freezeToggle',   'FREEZE TIME', freezeTime);
+}
+
+function toggleDev() {
+  devOpen = !devOpen;
+  document.getElementById('devOverlay').style.display = devOpen ? 'flex' : 'none';
+  if (devOpen) { renderGiveGrid(); updateToggleBtns(); document.exitPointerLock(); }
+  else canvas.requestPointerLock();
+}
+
+// drop the requested type a few blocks in front of the player, on the surface
+function spawnDevEnemy(typeName) {
+  const r = 5, ang = player.yaw;                 // forward in this game is (-sin, -cos)
+  const x = Math.floor(player.pos.x - Math.sin(ang) * r);
+  const z = Math.floor(player.pos.z - Math.cos(ang) * r);
+  const y = surfaceHeight(x, z);
+  spawnZombie(x + 0.5, y + 1.01, z + 0.5, typeName);
+}
+
+document.getElementById('creativeToggle').addEventListener('click', () => {
+  creative = !creative;
+  updateToggleBtns();
+  if (invOpen) renderCrafting();                 // recipes light up as free
+  showBanner(creative ? 'CREATIVE MODE ON' : 'CREATIVE MODE OFF', 1.2);
+});
+
+document.getElementById('aggroToggle').addEventListener('click', () => {
+  mobAggro = !mobAggro;
+  updateToggleBtns();
+  showBanner(mobAggro ? 'MOBS AGGRO ON' : 'MOBS IGNORE YOU', 1.2);
+});
+
+document.getElementById('freezeToggle').addEventListener('click', () => {
+  freezeTime = !freezeTime;
+  updateToggleBtns();
+  showBanner(freezeTime ? 'TIME FROZEN' : 'TIME RESUMED', 1.2);
+});
+
+document.getElementById('giveGrid').addEventListener('click', e => {
+  const slot = e.target.closest('.slot');
+  if (!slot) return;
+  const id = +slot.dataset.id;
+  const left = addItem(id, stackOf(id));
+  if (left) spawnDrop(player.pos.x, player.pos.y + 1, player.pos.z, id, left);
+});
+
+document.getElementById('spawnRow').addEventListener('click', e => {
+  const btn = e.target.closest('.spawnBtn');
+  if (btn) spawnDevEnemy(btn.dataset.type);
+});
+
+document.getElementById('devOverlay').addEventListener('click', e => {
+  if (e.target.id === 'devOverlay') toggleDev();
+});
+
 // ---------- HUD ----------
 function renderHotbar() {
   document.getElementById('hotbar').innerHTML =
@@ -2555,19 +2732,21 @@ function loop(now) {
 
   if (locked && !dead) step(dt);
   updateHeld(dt);
-  if (locked || dead || invOpen) {
+  if (locked || dead || invOpen || devOpen) {
     // clock frozen until the core is placed; N fast-forwards at 50x until the phase flips
     let clockDt = gameState === 'playing' ? dt : 0;
     if (ffActive) {
       clockDt = dt * 50;
       if (isNight() !== ffWasNight) { ffActive = false; clockDt = dt; }
     }
+    if (freezeTime) clockDt = 0;                  // dev: pause the clock, keep the world live
     updateDayNight(clockDt);
     updateZombies(dt);
     updateDrops(dt);
     updateProjectiles(dt);
     updateTurrets(dt);
     updateLeafDecay(dt);
+    updateBlockHP(dt);
     updateFX(dt);
   }
 
