@@ -723,32 +723,31 @@ function fbm(x, z, oct) {
   return val / tot;
 }
 
-// 3D value noise (for caves)
-function rnd3(x, y, z) {
-  const n = Math.sin(x * 127.1 + y * 269.5 + z * 311.7 + seed * 0.7137) * 43758.5453123;
-  return n - Math.floor(n);
+// ---------- mountain tunnels ----------
+// A few tubes run lengthwise (along x) through the mountains at a walkable height.
+// Each center-line is a closed-form function of x, so a chunk can carve its own
+// slice with no knowledge of its neighbors, and the fixed radius keeps the tunnel
+// a consistent, walkable size instead of the old blobby noise pockets.
+const TUNNELS = [
+  { z: -7, yb: 13 },
+  { z:  6, yb: 17 },
+  { z: 19, yb: 11 },
+];
+function tunnelCenter(x, t) {
+  return {
+    cz: t.z  + (fbm(x / 26, t.z * 0.21 + 5.5,  3) - 0.5) * 26,   // weaves left/right
+    cy: t.yb + (fbm(x / 30, t.z * 0.21 + 71.5, 3) - 0.5) * 9,    // gentle ups and downs
+  };
 }
-function noise3(x, y, z) {
-  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
-  const xf = x - xi, yf = y - yi, zf = z - zi;
-  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
-  const L = (a, b, t) => a + (b - a) * t;
-  return L(
-    L(L(rnd3(xi, yi, zi),     rnd3(xi + 1, yi, zi),     u), L(rnd3(xi, yi + 1, zi),     rnd3(xi + 1, yi + 1, zi),     u), v),
-    L(L(rnd3(xi, yi, zi + 1), rnd3(xi + 1, yi, zi + 1), u), L(rnd3(xi, yi + 1, zi + 1), rnd3(xi + 1, yi + 1, zi + 1), u), v),
-    w);
-}
-
-// winding tunnels where two noise bands intersect
-// returns 0 = solid, 1 = tunnel (stays under the crust), 2 = tunnel core (can breach the surface)
-function caveAt(x, y, z) {
-  const a = noise3(x / 19, y / 13, z / 19);
-  const da = Math.abs(a - 0.5);
-  if (da > 0.055) return 0;
-  const b = noise3(x / 19 + 87, y / 13 + 87, z / 19 + 87);
-  const db = Math.abs(b - 0.5);
-  if (db > 0.055) return 0;
-  return Math.max(da, db) < 0.016 ? 2 : 1;
+// nearest tube distance in the (y,z) cross-section: <1 is hollow, ~1..1.4 is the wall shell
+function tunnelDist(centers, y, z) {
+  let best = Infinity;
+  for (const c of centers) {
+    const dz = (z - c.cz) / 2.4, dy = (y - c.cy) / 2.2;   // ~4.8 wide x ~4.4 tall corridor
+    const d = Math.sqrt(dz * dz + dy * dy);
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 // ---------- world zones (unlocked by surviving nights) ----------
@@ -807,6 +806,7 @@ function genChunk(cx, cz) {
       const desertish = w.d > 0.5, mountainish = w.m > 0.5;
       // mountains are mostly bare rock: always above 24, plus noisy outcrops lower down
       const rocky = mountainish && (h > 24 || fbm(x / 14 + 33, z / 14 + 33, 2) > 0.52);
+      const tunCenters = w.m > 0.4 ? TUNNELS.map(t => tunnelCenter(x, t)) : null;
 
       for (let y = 0; y <= h; y++) {
         let b;
@@ -826,12 +826,12 @@ function genChunk(cx, cz) {
           if (x >= 48  && y < h - 5 && rnd2(x * 7.1 - y * 3.3, z * 4.7 + y * 6.1) > 0.93) b = IRON_ORE;
           if (x < -48  && y < h - 5 && rnd2(x * 5.9 + y * 2.7, z * 8.3 - y * 4.9) > 0.93) b = SULFUR_ORE;
         }
-        // carve cave tunnels through the mountains; only tunnel CORES breach the top
-        // crust (above water), so entrances are deliberate mouths, not a cratered surface
-        if (w.m > 0.4 && y >= 5 && y <= h) {
-          const cv = caveAt(x, y, z);
-          if (cv === 1 && y <= h - 2) b = AIR;
-          else if (cv === 2 && (y <= h - 2 || h > SEA + 2)) b = AIR;
+        // carve walkable tunnels through the mountains; vein their walls with iron
+        if (tunCenters && y >= 5 && y <= h) {
+          const td = tunnelDist(tunCenters, y, z);
+          if (td < 1) b = AIR;                                  // the hollow corridor
+          else if (b === STONE && x >= 48 && td < 1.4 &&        // ore exposed in the tunnel walls
+                   rnd2(x * 4.3 + y * 1.9, z * 2.7 - y * 5.1) > 0.89) b = IRON_ORE;
         }
         data[lidx(lx, y, lz)] = b;
       }
