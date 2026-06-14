@@ -308,7 +308,7 @@ let RENDER_DIST = 6;         // render radius in chunks — [ and ] to change
 // ---------- block registry ----------
 const AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, WATER = 5,
       LOG = 6, LEAF = 7, PLANK = 8, BRICK = 9, TORCH = 10, COAL_ORE = 11, CORE = 12, TURRET = 13,
-      IRON_ORE = 14, SULFUR_ORE = 15, CACTUS = 16;
+      IRON_ORE = 14, SULFUR_ORE = 15, CACTUS = 16, BOMB_TURRET = 17;
 
 const BLOCKS = {
   [GRASS]: { name: 'Grass', top: 0x68b342, side: 0x7d9c45, bottom: 0x8a5f3c },
@@ -324,6 +324,7 @@ const BLOCKS = {
   [COAL_ORE]: { name: 'Coal Ore', top: 0x5b5b5b, side: 0x565656, bottom: 0x565656 },
   [CORE]: { name: 'Base Core', top: 0x9ff0ff, side: 0x3fb6e8, bottom: 0x2f86b8 },
   [TURRET]: { name: 'Turret', top: 0x8a8a8a, side: 0x6e6e6e, bottom: 0x5a5a5a },
+  [BOMB_TURRET]: { name: 'Bomb Turret', top: 0x6a6258, side: 0x55504a, bottom: 0x3a3730 },
   [IRON_ORE]:   { name: 'Iron Ore',   top: 0x9a8a78, side: 0x95846f, bottom: 0x95846f },
   [SULFUR_ORE]: { name: 'Sulfur Ore', top: 0x9a9148, side: 0x958c42, bottom: 0x958c42 },
   [CACTUS]:     { name: 'Cactus',     top: 0x5fae47, side: 0x3f7a2e, bottom: 0x35682a },
@@ -515,6 +516,21 @@ function turretIcon() {
   });
 }
 
+function bombTurretIcon() {
+  return pixCanvas(16, (g, p) => {
+    for (let x = 3; x <= 12; x++) p(x, 14, '#3a3730');           // pedestal
+    for (let x = 4; x <= 11; x++) p(x, 13, '#55504a');
+    for (let x = 5; x <= 10; x++) p(x, 12, '#6a6258');
+    for (let y = 9; y <= 11; y++) { p(7, y, '#8a6a3a'); p(8, y, '#7a5a30'); }   // post
+    const tube = [[6,8],[7,7],[8,6],[9,5],[6,9],[7,8],[8,7],[9,6]];             // tilted mortar barrel
+    for (const [x, y] of tube) p(x, y, '#2e2e2e');
+    p(7, 9, '#444'); p(8, 8, '#444');
+    p(9, 4, '#e0cf52'); p(10, 4, '#e0cf52');                     // sulfur muzzle band
+    p(10, 3, '#222');                                            // loaded bomb
+    p(11, 2, '#ffa030'); p(11, 1, '#ffe87a');                    // fuse spark
+  });
+}
+
 function iconFor(id) {
   if (ICONS[id]) return ICONS[id];
   let url;
@@ -528,6 +544,7 @@ function iconFor(id) {
   else if (id === BOW)     url = bowIcon();
   else if (id === ARROW)   url = arrowIcon();
   else if (id === TURRET)  url = turretIcon();
+  else if (id === BOMB_TURRET) url = bombTurretIcon();
   else if (id === IRON)    url = ironIcon();
   else if (id === SULFUR)  url = sulfurIcon();
   else if (id === BOMB)    url = bombIcon();
@@ -569,7 +586,7 @@ function consumeSelected() {
   if (invOpen) renderInventory();
 }
 
-const isOpaque = b => b !== AIR && b !== WATER && b !== TORCH && b !== TURRET && b !== CACTUS;  // partial blocks don't hide neighbors
+const isOpaque = b => b !== AIR && b !== WATER && b !== TORCH && b !== TURRET && b !== BOMB_TURRET && b !== CACTUS;  // partial blocks don't hide neighbors
 const isSolid  = b => b !== AIR && b !== WATER && b !== TORCH;  // walk through torches; turrets/cacti are solid
 
 // ---------- world storage (unbounded, chunked) ----------
@@ -614,7 +631,7 @@ const BLOCK_HP_DEFAULT = 60;
 const BLOCK_HP = {
   [BRICK]: 500,                                      // sturdiest — earns its craft
   [STONE]: 250, [COAL_ORE]: 150, [IRON_ORE]: 150, [SULFUR_ORE]: 150,
-  [TURRET]: 250,
+  [TURRET]: 250, [BOMB_TURRET]: 250,
   [LOG]: 100, [PLANK]: 100,                            // wood: equal, on purpose
   [DIRT]: 60, [GRASS]: 60,
   [SAND]: 45, [CACTUS]: 40, [LEAF]: 25,
@@ -661,8 +678,10 @@ function setBlock(x, y, z, b) {
   }
   if (b === TORCH) torches.push({ x, y, z });
 
-  if (old === TURRET && b !== TURRET) removeTurretAt(x, y, z);
-  if (b === TURRET) addTurret(x, y, z);
+  const wasTurret = old === TURRET || old === BOMB_TURRET;
+  const isTurret  = b === TURRET || b === BOMB_TURRET;
+  if (wasTurret && b !== old) removeTurretAt(x, y, z);
+  if (isTurret && b !== old) addTurret(x, y, z, b === BOMB_TURRET ? 'bomb' : 'bolt');
 
   if ((old === LOG || old === LEAF) && b === AIR) queueLeafChecksAround(x, y, z);
 
@@ -1028,6 +1047,13 @@ function buildHeld(id) {
     const stock = shadedPart(0.05, 0.04, 0.18, 0x8a6a3a); stock.position.set(0, 0.2, -0.02);
     g.add(base, post, limbs, stock);
     rot = [0.35, 0.55, 0];
+  } else if (id === BOMB_TURRET) {
+    const base = heldCube(0x6a6258, 0x55504a, 0x3a3730, 0.2); base.scale.y = 0.45; base.position.y = 0.02;
+    const post = shadedPart(0.06, 0.1, 0.06, 0x8a6a3a); post.position.y = 0.12;
+    const tube = shadedPart(0.12, 0.2, 0.12, 0x2e2e2e); tube.position.set(0, 0.22, 0.03); tube.rotation.x = -0.6;
+    const band = shadedPart(0.14, 0.04, 0.14, 0xe0cf52); band.position.set(0, 0.31, 0.08); band.rotation.x = -0.6;
+    g.add(base, post, tube, band);
+    rot = [0.35, 0.55, 0];
   } else if (id === BOW) {
     const grip = shadedPart(0.05, 0.17, 0.05, 0x6b4a2b);
     const limbT = shadedPart(0.045, 0.3, 0.045, 0x6b4a2b);
@@ -1266,10 +1292,12 @@ function buildChunk(cx, cz) {
           continue;
         }
 
-        if (b === TURRET) {
-          // stone pedestal + wooden post; the crossbow head is a live entity on top
+        if (b === TURRET || b === BOMB_TURRET) {
+          // pedestal + wooden post; the firing head is a live entity on top
           const tl0 = tAt(x + 0.5, y + 1, z + 0.5);
-          emitBox(sets.solid, x + 0.14, y + 0.003, z + 0.14, x + 0.86, y + 0.22, z + 0.86, 0x6e6e6e, 0x8a8a8a, tl0);
+          const pedSide = b === BOMB_TURRET ? 0x55504a : 0x6e6e6e;
+          const pedTop  = b === BOMB_TURRET ? 0x6a6258 : 0x8a8a8a;
+          emitBox(sets.solid, x + 0.14, y + 0.003, z + 0.14, x + 0.86, y + 0.22, z + 0.86, pedSide, pedTop, tl0);
           emitBox(sets.solid, x + 0.40, y + 0.22,  z + 0.40, x + 0.60, y + 0.52, z + 0.60, 0x7a6244, 0x8a6a3a, tl0);
           continue;
         }
@@ -1286,7 +1314,7 @@ function buildChunk(cx, cz) {
           const { dir, corners, shade } = FACES[f];
           const nb = getBlock(x + dir[0], y + dir[1], z + dir[2]);
           const show = b === WATER
-            ? (nb === AIR || nb === TORCH || nb === TURRET || nb === CACTUS)   // water against air/partial blocks
+            ? (nb === AIR || nb === TORCH || nb === TURRET || nb === BOMB_TURRET || nb === CACTUS)   // water against air/partial blocks
             : !isOpaque(nb);                     // solids against air/water/torches
           if (!show) continue;
 
@@ -1504,7 +1532,7 @@ function attack() {
       }
     }
     const dropId = b === COAL_ORE ? COAL : b === IRON_ORE ? IRON : b === SULFUR_ORE ? SULFUR : b;
-    if (b !== LEAF || Math.random() < 0.4)             // leaves only drop sometimes
+    if (b !== LEAF || Math.random() < 0.1)             // leaves only drop sometimes
       spawnDrop(blockHit.x + 0.5, blockHit.y + 0.25, blockHit.z + 0.5, dropId, 1);
   }
 }
@@ -2213,6 +2241,7 @@ const RECIPES = [
   { out: { id: ARROW,   n: 4 }, ins: [{ id: STICK, n: 1 }, { id: STONE, n: 1 }] },
   { out: { id: SWORD_I, n: 1 }, ins: [{ id: IRON, n: 2 }, { id: STICK, n: 1 }] },
   { out: { id: TURRET,  n: 1 }, ins: [{ id: BOW, n: 1 }, { id: PLANK, n: 2 }, { id: IRON, n: 2 }] },
+  { out: { id: BOMB_TURRET, n: 1 }, ins: [{ id: BOMB, n: 3 }, { id: IRON, n: 2 }, { id: PLANK, n: 2 }] },
   { out: { id: BOMB,    n: 2 }, ins: [{ id: SULFUR, n: 2 }, { id: COAL, n: 1 }] },
   { out: { id: BRICK,   n: 2 }, ins: [{ id: STONE, n: 2 }] },
 ];
@@ -2308,7 +2337,7 @@ function updateProjectiles(dt) {
     const p = projectiles[i];
     p.life -= dt;
     if (p.life <= 0 || p.pos.y < -10) {
-      if (p.bomb && p.pos.y > -10) explode(p.pos);
+      if (p.bomb && p.pos.y > -10) explode(p.pos, p.turretBomb ? SAFE_BLAST : undefined);
       removeProjectile(p); continue;
     }
 
@@ -2322,8 +2351,8 @@ function updateProjectiles(dt) {
         if (!p.friendly) damageBase(p.dmg);
         hit = true; break;
       }
-      if (isSolid(b) && b !== TURRET) {           // bolts fly past turret emplacements
-        if (p.bomb) { explode(p.pos); hit = true; break; }
+      if (isSolid(b) && b !== TURRET && b !== BOMB_TURRET) {   // shots fly past turret emplacements
+        if (p.bomb) { explode(p.pos, p.turretBomb ? SAFE_BLAST : undefined); hit = true; break; }
         if (p.arrow && !p.noRecover && Math.random() < 0.6)   // recover some spent arrows
           spawnDrop(p.pos.x, p.pos.y + 0.3, p.pos.z, ARROW, 1);
         hit = true; break;
@@ -2334,7 +2363,7 @@ function updateProjectiles(dt) {
           if (z.dying) continue;
           if (Math.abs(p.pos.x - z.pos.x) < z.w + 0.15 && Math.abs(p.pos.z - z.pos.z) < z.w + 0.15 &&
               p.pos.y > z.pos.y - 0.1 && p.pos.y < z.pos.y + z.h + 0.15) {
-            if (p.bomb) explode(p.pos);
+            if (p.bomb) explode(p.pos, p.turretBomb ? SAFE_BLAST : undefined);
             else damageZombie(z, p.dmg, p.vel.clone().normalize());
             hit = true; break;
           }
@@ -2386,14 +2415,15 @@ function updateLeafDecay(dt) {
     if (getBlock(x, y, z) !== LEAF) continue;
     if (hasLogNear(x, y, z, 3)) continue;          // still attached to a trunk
     setBlock(x, y, z, AIR);                        // removal re-flags neighbors -> cascade
-    if (Math.random() < 0.4)
+    if (Math.random() < 0.1)
       spawnDrop(x + 0.5, y + 0.4, z + 0.5, LEAF, 1);
   }
 }
 
 // ---------- crossbow turrets ----------
 const turrets = [];
-const TURRET_RANGE = 14, TURRET_CD = 1.1, TURRET_DMG = 6;
+const TURRET_RANGE = 18, TURRET_CD = 1.5, TURRET_DMG = 4;
+const BOMB_TURRET_RANGE = 13, BOMB_TURRET_CD = 2.6;   // slower, but lobs splash bombs that spare your blocks
 
 // where to aim at this zombie: lead its movement, compensate for bolt drop,
 // pull toward the near edge of its hitbox, and aim high on targets below ledges
@@ -2414,23 +2444,31 @@ function turretLOS(t, tp) {
   for (let s = 1; s < 8; s++) {
     const k = s / 8;
     const b = getBlock(Math.floor(fx + (tp.x - fx) * k), Math.floor(fy + (tp.y - fy) * k), Math.floor(fz + (tp.z - fz) * k));
-    if (isSolid(b) && b !== TURRET) return false;
+    if (isSolid(b) && b !== TURRET && b !== BOMB_TURRET) return false;
   }
   return true;
 }
 
-function addTurret(x, y, z) {
+function addTurret(x, y, z, kind = 'bolt') {
   const g = new THREE.Group();
-  const stock  = shadedPart(0.13, 0.10, 0.46, 0x8a6a3a); stock.position.z = -0.04;
-  const limbs  = shadedPart(0.56, 0.07, 0.07, 0x6b4a2b); limbs.position.z = 0.17;
-  const string = shadedPart(0.50, 0.022, 0.022, 0xe0e0cc); string.position.z = 0.09;
-  const bolt   = shadedPart(0.045, 0.045, 0.32, 0xc8c8c8); bolt.position.z = 0.10;
-  g.add(stock, limbs, string, bolt);
+  if (kind === 'bomb') {
+    // a stubby angled mortar that lobs bombs over your walls
+    const body = shadedPart(0.26, 0.18, 0.30, 0x55504a); body.position.z = -0.02;
+    const tube = shadedPart(0.17, 0.17, 0.34, 0x2e2e2e); tube.position.set(0, 0.10, 0.12); tube.rotation.x = -0.6;
+    const band = shadedPart(0.20, 0.05, 0.20, 0xe0cf52); band.position.set(0, 0.21, 0.22); band.rotation.x = -0.6;
+    g.add(body, tube, band);
+  } else {
+    const stock  = shadedPart(0.13, 0.10, 0.46, 0x8a6a3a); stock.position.z = -0.04;
+    const limbs  = shadedPart(0.56, 0.07, 0.07, 0x6b4a2b); limbs.position.z = 0.17;
+    const string = shadedPart(0.50, 0.022, 0.022, 0xe0e0cc); string.position.z = 0.09;
+    const bolt   = shadedPart(0.045, 0.045, 0.32, 0xc8c8c8); bolt.position.z = 0.10;
+    g.add(stock, limbs, string, bolt);
+  }
   g.position.set(x + 0.5, y + 0.62, z + 0.5);
   scene.add(g);
   const mats = [];
   g.traverse(o => { if (o.isMesh) mats.push(...o.material); });
-  turrets.push({ x, y, z, head: g, mats, cd: 0, yaw: Math.random() * Math.PI * 2, recoil: 0 });
+  turrets.push({ x, y, z, kind, head: g, mats, cd: 0, yaw: Math.random() * Math.PI * 2, recoil: 0 });
 }
 
 function removeTurretAt(x, y, z) {
@@ -2452,15 +2490,35 @@ function updateTurrets(dt) {
     t.cd -= dt;
     t.recoil = Math.max(0, t.recoil - dt * 3.5);
 
-    // nearest zombie in range with a clear shot to its computed aim point
-    let best = null, bestTp = null, bd = TURRET_RANGE;
-    for (const z of zombies) {
-      if (z.dying) continue;
-      const d = Math.hypot(z.pos.x - (t.x + 0.5), z.pos.z - (t.z + 0.5));
-      const dy = z.pos.y - t.y;
-      if (d < bd && dy > -6 && dy < 8) {
-        const tp = turretAimPoint(t, z, d);
-        if (turretLOS(t, tp)) { best = z; bestTp = tp; bd = d; }
+    const bomb = t.kind === 'bomb';
+    let best = null, bestTp = null;
+
+    if (bomb) {
+      // aim at the densest cluster so the splash catches the most zombies; arcs over walls (no LOS)
+      let bestScore = -Infinity;
+      for (const z of zombies) {
+        if (z.dying) continue;
+        const d = Math.hypot(z.pos.x - (t.x + 0.5), z.pos.z - (t.z + 0.5));
+        const dy = z.pos.y - t.y;
+        if (d >= BOMB_TURRET_RANGE || dy < -6 || dy > 8) continue;
+        let cluster = 0;
+        for (const o of zombies)
+          if (!o.dying && Math.hypot(o.pos.x - z.pos.x, o.pos.z - z.pos.z) < 3.0) cluster++;
+        const score = cluster - d * 0.01;           // prefer crowds, then nearer ones
+        if (score > bestScore) { bestScore = score; best = z; }
+      }
+      if (best) bestTp = new THREE.Vector3(best.pos.x, best.pos.y + 0.1, best.pos.z);
+    } else {
+      // nearest zombie in range with a clear shot to its computed aim point
+      let bd = TURRET_RANGE;
+      for (const z of zombies) {
+        if (z.dying) continue;
+        const d = Math.hypot(z.pos.x - (t.x + 0.5), z.pos.z - (t.z + 0.5));
+        const dy = z.pos.y - t.y;
+        if (d < bd && dy > -6 && dy < 8) {
+          const tp = turretAimPoint(t, z, d);
+          if (turretLOS(t, tp)) { best = z; bestTp = tp; bd = d; }
+        }
       }
     }
 
@@ -2469,11 +2527,16 @@ function updateTurrets(dt) {
       const diff = angTo(t.yaw, want);
       t.yaw += diff * Math.min(1, dt * 9);
       if (t.cd <= 0 && Math.abs(diff) < 0.25) {
-        t.cd = TURRET_CD;
         t.recoil = 1;
         const from = new THREE.Vector3(t.x + 0.5, t.y + 0.66, t.z + 0.5);
-        const dir = bestTp.clone().sub(from).normalize();
-        spawnArrow(from.addScaledVector(dir, 0.3), dir.multiplyScalar(26), TURRET_DMG, true);
+        if (bomb) {
+          t.cd = BOMB_TURRET_CD;
+          spawnTurretBomb(from, lobVelocity(from, bestTp, 14, 16));
+        } else {
+          t.cd = TURRET_CD;
+          const dir = bestTp.clone().sub(from).normalize();
+          spawnArrow(from.addScaledVector(dir, 0.3), dir.multiplyScalar(26), TURRET_DMG, true);
+        }
       }
     } else {
       t.yaw += dt * 0.4;                             // idle scan
@@ -2517,18 +2580,25 @@ function updateFX(dt) {
 }
 function clearFX() { while (fxs.length) { const f = fxs.pop(); scene.remove(f.mesh); f.mesh.geometry.dispose(); f.mesh.material.dispose(); } }
 
-function explode(pos) {
+// turret bombs use this: pure anti-zombie splash — no terrain craters, no friendly fire
+const SAFE_BLAST = { terrain: false, hurtPlayer: false };
+
+function explode(pos, opts = {}) {
+  const breakTerrain = opts.terrain !== false;
+  const hurtPlayer   = opts.hurtPlayer !== false;
   spawnBoom(pos);
-  // crater (the core is shielded)
-  const R = 2.2;
-  for (let x = Math.floor(pos.x - R); x <= Math.floor(pos.x + R); x++)
-    for (let y = Math.max(1, Math.floor(pos.y - R)); y <= Math.floor(pos.y + R); y++)
-      for (let z = Math.floor(pos.z - R); z <= Math.floor(pos.z + R); z++) {
-        if (Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z) > R) continue;
-        const b = getBlock(x, y, z);
-        if (b === AIR || b === WATER || b === CORE) continue;
-        setBlock(x, y, z, AIR);
-      }
+  // crater (the core is shielded) — skipped for blasts that spare the terrain
+  if (breakTerrain) {
+    const R = 2.2;
+    for (let x = Math.floor(pos.x - R); x <= Math.floor(pos.x + R); x++)
+      for (let y = Math.max(1, Math.floor(pos.y - R)); y <= Math.floor(pos.y + R); y++)
+        for (let z = Math.floor(pos.z - R); z <= Math.floor(pos.z + R); z++) {
+          if (Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z) > R) continue;
+          const b = getBlock(x, y, z);
+          if (b === AIR || b === WATER || b === CORE) continue;
+          setBlock(x, y, z, AIR);
+        }
+  }
   // zombies: damage + knockback with falloff
   for (const z of zombies) {
     if (z.dying) continue;
@@ -2539,10 +2609,21 @@ function explode(pos) {
     }
   }
   // careless thrower
-  if (!dead) {
+  if (hurtPlayer && !dead) {
     const pd = Math.hypot(player.pos.x - pos.x, player.pos.y + 0.9 - pos.y, player.pos.z - pos.z);
     if (pd < 3.4) damagePlayer(Math.ceil(12 * (1 - pd / 3.4)), pos);
   }
+}
+
+// a bomb turret's shell: friendly, lobbed, splash-only (no terrain crater, no self-harm)
+function spawnTurretBomb(pos, vel) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 0.22),
+    new THREE.MeshBasicMaterial({ color: 0x222222 }));
+  scene.add(m);
+  projectiles.push({
+    mesh: m, bomb: true, turretBomb: true, friendly: true, grav: 16, dmg: 0, life: 4,
+    pos: pos.clone(), vel: vel.clone(),
+  });
 }
 
 let lastBomb = 0;
@@ -2629,7 +2710,7 @@ let creative = false, devOpen = false, mobAggro = true, freezeTime = false;
 // everything you can hand yourself: blocks first, then items/tools
 const GIVE_LIST = [
   GRASS, DIRT, STONE, SAND, LOG, LEAF, PLANK, BRICK, TORCH,
-  COAL_ORE, IRON_ORE, SULFUR_ORE, CACTUS, WATER, CORE, TURRET,
+  COAL_ORE, IRON_ORE, SULFUR_ORE, CACTUS, WATER, CORE, TURRET, BOMB_TURRET,
   STICK, COAL, IRON, SULFUR, FLESH, ARROW, BOMB,
   SWORD_W, SWORD_S, SWORD_I, BOW,
 ];
