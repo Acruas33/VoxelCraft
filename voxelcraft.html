@@ -245,8 +245,10 @@
       <button id="creativeToggle" class="devBtn">CREATIVE: OFF</button>
       <button id="aggroToggle" class="devBtn">MOB AGGRO: ON</button>
       <button id="freezeToggle" class="devBtn">FREEZE TIME: OFF</button>
+      <button id="baseInvToggle" class="devBtn">BASE INVINCIBLE: OFF</button>
+      <button id="regenToggle" class="devBtn">BLOCK REGEN: ON</button>
     </div>
-    <div class="devNote" style="margin-top:6px;">creative = free crafting + no damage &middot; aggro off = mobs ignore you &middot; freeze = pause day/night, world stays live</div>
+    <div class="devNote" style="margin-top:6px;">creative = free crafting + no damage (double-tap Space to fly) &middot; aggro off = mobs ignore you &middot; freeze = pause day/night, world stays live</div>
     <div id="devDivider"></div>
     <h2 style="font-size:13px;">GIVE ITEMS</h2>
     <div class="invGrid" id="giveGrid"></div>
@@ -257,6 +259,14 @@
       <button class="devBtn spawnBtn" data-type="runner">Runner</button>
       <button class="devBtn spawnBtn" data-type="brute">Brute</button>
       <button class="devBtn spawnBtn" data-type="spitter">Spitter</button>
+      <button class="devBtn spawnBtn" data-type="bomber">Bomber</button>
+    </div>
+    <div id="devDivider"></div>
+    <h2 style="font-size:13px;">SKIP NIGHTS</h2>
+    <div class="devRow" id="nightRow">
+      <button class="devBtn" id="night1">NEXT NIGHT</button>
+      <button class="devBtn" id="night5">+5 NIGHTS</button>
+      <span class="devNote">jumps straight into that night's wave</span>
     </div>
     <div id="invHint">Click an item to add a stack &nbsp;·&nbsp; ` to close</div>
   </div>
@@ -332,6 +342,15 @@ const BLOCKS = {
 const FLESH = 100;                       // item-only (not placeable): zombie drop, edible
 const STICK = 101, COAL = 102, SWORD_W = 103, SWORD_S = 104, BOW = 105, ARROW = 106,
       IRON = 107, SULFUR = 108, BOMB = 109, SWORD_I = 110;
+// dev-only spawn eggs (not craftable; handed out from the creative menu) — right-click to spawn that mob
+const EGG_WALKER = 111, EGG_RUNNER = 112, EGG_BRUTE = 113, EGG_SPITTER = 114, EGG_BOMBER = 115;
+const EGGS = {
+  [EGG_WALKER]:  { name: 'Walker Egg',  type: 'walker',  color: 0x4f9e43 },
+  [EGG_RUNNER]:  { name: 'Runner Egg',  type: 'runner',  color: 0xa8b85a },
+  [EGG_BRUTE]:   { name: 'Brute Egg',   type: 'brute',   color: 0x3f7a36 },
+  [EGG_SPITTER]: { name: 'Spitter Egg', type: 'spitter', color: 0x8fa83a },
+  [EGG_BOMBER]:  { name: 'Bomber Egg',  type: 'bomber',  color: 0x9aa84a },
+};
 const STACK = 64;
 const stackOf = id => (id === SWORD_W || id === SWORD_S || id === SWORD_I || id === BOW) ? 1 : STACK;
 
@@ -347,6 +366,7 @@ function itemInfo(id) {
   if (id === SULFUR)  return { name: 'Sulfur', color: 0xe0cf52 };
   if (id === BOMB)    return { name: 'Bomb',   color: 0x2a2a2a };
   if (id === SWORD_I) return { name: 'Iron Sword', color: 0xd8dde2 };
+  if (EGGS[id])       return { name: EGGS[id].name, color: EGGS[id].color };
   return { name: BLOCKS[id].name, color: BLOCKS[id].top };
 }
 
@@ -531,9 +551,21 @@ function bombTurretIcon() {
   });
 }
 
+// a speckled spawn egg tinted to the mob it makes
+function eggIcon(hex) {
+  const base = hex6(hex), dark = shadeHex(hex, 0.6), lite = shadeHex(hex, 1.35);
+  return pixCanvas(16, (g, p) => {
+    const rows = [[7, 2], [6, 4], [5, 6], [5, 6], [4, 8], [4, 8], [4, 8], [5, 6], [6, 4]];  // egg outline, rows 4..12
+    rows.forEach(([sx, w], i) => { for (let x = sx; x < sx + w; x++) p(x, 4 + i, base); });
+    p(6, 6, dark); p(9, 7, dark); p(7, 9, dark); p(10, 9, dark); p(6, 11, dark);            // speckles
+    p(7, 5, lite); p(6, 7, lite);                                                            // sheen
+  });
+}
+
 function iconFor(id) {
   if (ICONS[id]) return ICONS[id];
   let url;
+  if (EGGS[id]) return (ICONS[id] = eggIcon(EGGS[id].color));
   if      (id === SWORD_W) url = swordIcon('#cfa874', '#a87f48', '#7d5c33');
   else if (id === SWORD_S) url = swordIcon('#cfcfcf', '#9a9a9a', '#6e6e6e');
   else if (id === SWORD_I) url = swordIcon('#f0f4f8', '#c8ced6', '#949ca6');
@@ -1447,6 +1479,11 @@ addEventListener('keydown', e => {
   }
   if (e.code === 'KeyE' && !dead && (locked || invOpen)) toggleInventory();
   if (e.code === 'Backquote' && !dead && (locked || devOpen)) toggleDev();
+  if (e.code === 'Space' && !e.repeat && creative && locked) {     // double-tap space toggles creative flight
+    const now = performance.now();
+    if (now - lastSpaceTap < 300) { flying = !flying; player.vel.y = 0; showBanner(flying ? '✈ FLYING' : 'FLY OFF', 0.8); }
+    lastSpaceTap = now;
+  }
   if (e.code === 'KeyN' && locked && !dead && gameState === 'playing' && !ffActive && !freezeTime) {
     if (!isNight() || nightCleared()) { ffActive = true; ffWasNight = isNight(); }
   }
@@ -1587,8 +1624,24 @@ function useItem() {
   }
   if (s.id === BOW) { bowShoot(); return; }
   if (s.id === BOMB) { throwBomb(); return; }
+  if (EGGS[s.id]) { spawnEggMob(EGGS[s.id].type); return; }
   if (!BLOCKS[s.id]) return;                  // sticks, coal, swords, arrows aren't placeable
   placeBlock(s.id);
+}
+
+// spawn-egg: drop the mob on the block face you're aiming at (or just ahead if aiming at sky)
+function spawnEggMob(typeName) {
+  const hit = raycast(6);
+  let x, y, z;
+  if (hit) {
+    const [fx, fy, fz] = hit.face;
+    x = hit.x + fx + 0.5; y = hit.y + fy + 0.01; z = hit.z + fz + 0.5;
+  } else {
+    const dir = camera.getWorldDirection(new THREE.Vector3());
+    x = player.pos.x + dir.x * 3; z = player.pos.z + dir.z * 3; y = player.pos.y + 0.5;
+  }
+  spawnZombie(x, y, z, typeName);
+  consumeSelected();
 }
 
 function placeBlock(blockId) {
@@ -1626,7 +1679,37 @@ function inWater() {
   return getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y + 0.4), Math.floor(player.pos.z)) === WATER;
 }
 
+// creative flight: WASD glide, Space up, Shift down, no gravity, collisions still apply
+function stepFly(dt) {
+  const FLY = 10;
+  const sin = Math.sin(player.yaw), cos = Math.cos(player.yaw);
+  let mx = 0, mz = 0;
+  if (keys.KeyW) { mx -= sin; mz -= cos; }
+  if (keys.KeyS) { mx += sin; mz += cos; }
+  if (keys.KeyA) { mx -= cos; mz += sin; }
+  if (keys.KeyD) { mx += cos; mz -= sin; }
+  const len = Math.hypot(mx, mz) || 1;
+  const horiz = (mx || mz) ? FLY : 0;                       // ease to a stop when no input
+  const k = Math.min(1, 16 * dt);
+  player.vel.x += (mx / len * horiz - player.vel.x) * k;
+  player.vel.z += (mz / len * horiz - player.vel.z) * k;
+  let vy = 0;
+  if (keys.Space) vy += 1;
+  if (keys.ShiftLeft || keys.ShiftRight) vy -= 1;
+  player.vel.y = vy * FLY;
+
+  const p = player.pos, v = player.vel;
+  p.x += v.x * dt; if (boxCollides(p.x, p.y, p.z)) { p.x -= v.x * dt; v.x = 0; }
+  p.z += v.z * dt; if (boxCollides(p.x, p.y, p.z)) { p.z -= v.z * dt; v.z = 0; }
+  p.y += v.y * dt; if (boxCollides(p.x, p.y, p.z)) { p.y -= v.y * dt; v.y = 0; }
+  player.onGround = false;
+
+  camera.position.set(p.x, p.y + player.EYE, p.z);
+  camera.rotation.set(player.pitch, player.yaw, 0);
+}
+
 function step(dt) {
+  if (flying) { stepFly(dt); return; }
   const swim = inWater();
   const sprint = keys.ShiftLeft || keys.ShiftRight;
   const speed = swim ? 3.2 : sprint ? 8.2 : 5.2;
@@ -1727,7 +1810,7 @@ function updateBaseBar(flash) {
 }
 
 function damageBase(n) {
-  if (gameState !== 'playing') return;
+  if (gameState !== 'playing' || baseInvincible) return;
   baseHP = Math.max(0, baseHP - n);
   updateBaseBar(true);
   if (baseHP <= 0) {
@@ -2839,6 +2922,7 @@ const GIVE_LIST = [
   COAL_ORE, IRON_ORE, SULFUR_ORE, CACTUS, WATER, CORE, TURRET, BOMB_TURRET,
   STICK, COAL, IRON, SULFUR, FLESH, ARROW, BOMB,
   SWORD_W, SWORD_S, SWORD_I, BOW,
+  EGG_WALKER, EGG_RUNNER, EGG_BRUTE, EGG_SPITTER, EGG_BOMBER,
 ];
 
 function renderGiveGrid() {
@@ -2859,6 +2943,8 @@ function updateToggleBtns() {
   set('creativeToggle', 'CREATIVE', creative);
   set('aggroToggle',    'MOB AGGRO', mobAggro);
   set('freezeToggle',   'FREEZE TIME', freezeTime);
+  set('baseInvToggle',  'BASE INVINCIBLE', baseInvincible);
+  set('regenToggle',    'BLOCK REGEN', blockRegen);
 }
 
 function toggleDev() {
@@ -2877,11 +2963,39 @@ function spawnDevEnemy(typeName) {
   spawnZombie(x + 0.5, y + 1.01, z + 0.5, typeName);
 }
 
+// fast-forward straight into a chosen night's wave (for testing late-game difficulty)
+function jumpToNight(target) {
+  if (gameState !== 'playing') { showBanner('PLACE YOUR CORE FIRST', 1.5); return; }
+  target = Math.max(1, target);
+  clearZombies();                                // start the night fresh
+  waveLeft = 0;
+  nightNum = target - 1;                          // the upcoming dusk bumps it to `target`
+  if (target >= 2) unlocked.mountain = true;      // open the lands that would be unlocked by now
+  if (target >= 3) unlocked.desert = true;
+  forceStream = true;
+  timeOfDay = 0.54;                              // just past sunset → night
+  wasNight = false;                              // let updateWaves fire the dusk wave for `target`
+  updateDayNight(0);                             // refresh sky/sun immediately
+}
+
 document.getElementById('creativeToggle').addEventListener('click', () => {
   creative = !creative;
+  if (!creative) flying = false;                 // can't keep flying once creative is off
   updateToggleBtns();
   if (invOpen) renderCrafting();                 // recipes light up as free
   showBanner(creative ? 'CREATIVE MODE ON' : 'CREATIVE MODE OFF', 1.2);
+});
+
+document.getElementById('baseInvToggle').addEventListener('click', () => {
+  baseInvincible = !baseInvincible;
+  updateToggleBtns();
+  showBanner(baseInvincible ? 'BASE INVINCIBLE' : 'BASE VULNERABLE', 1.2);
+});
+
+document.getElementById('regenToggle').addEventListener('click', () => {
+  blockRegen = !blockRegen;
+  updateToggleBtns();
+  showBanner(blockRegen ? 'BLOCK REGEN ON' : 'BLOCK REGEN OFF', 1.2);
 });
 
 document.getElementById('aggroToggle').addEventListener('click', () => {
@@ -2908,6 +3022,9 @@ document.getElementById('spawnRow').addEventListener('click', e => {
   const btn = e.target.closest('.spawnBtn');
   if (btn) spawnDevEnemy(btn.dataset.type);
 });
+
+document.getElementById('night1').addEventListener('click', () => jumpToNight(nightNum + 1));
+document.getElementById('night5').addEventListener('click', () => jumpToNight(nightNum + 5));
 
 document.getElementById('devOverlay').addEventListener('click', e => {
   if (e.target.id === 'devOverlay') toggleDev();
