@@ -639,6 +639,7 @@ const BLOCK_HP = {
 const blockToughness = id => BLOCK_HP[id] ?? BLOCK_HP_DEFAULT;
 
 const blockHP = new Map();                           // "x,y,z" -> {id, hp, cd}, only while damaged
+const placed  = new Set();                           // "x,y,z" the player built — the only blocks bombers may break
 
 // chip away at a block; returns true if this hit broke it
 function damageBlock(x, y, z, dmg) {
@@ -648,17 +649,44 @@ function damageBlock(x, y, z, dmg) {
   if (!e || e.id !== id) { e = { id, hp: blockToughness(id), cd: 0 }; blockHP.set(k, e); }
   e.hp -= dmg;
   e.cd = 2;                                          // hold off regen for 2s after the last hit
-  if (e.hp <= 0) { blockHP.delete(k); setBlock(x, y, z, AIR); return true; }
+  if (e.hp <= 0) { blockHP.delete(k); clearCrack(k); setBlock(x, y, z, AIR); return true; }
   return false;
 }
 
-// walls left alone slowly knit back together (this also self-cleans the map)
+// ---------- damage overlay ----------
+// a darkening box drawn over any block that's currently damaged, so you can read at a
+// glance how close a wall is to breaking
+const cracks = new Map();                            // "x,y,z" -> overlay mesh
+const crackGeo = new THREE.BoxGeometry(1.015, 1.015, 1.015);
+
+function setCrack(k, frac) {
+  const op = frac > 0.1 ? Math.min(0.66, frac * 0.72) : 0;
+  let m = cracks.get(k);
+  if (op <= 0) { if (m) clearCrack(k); return; }
+  if (!m) {
+    const [x, y, z] = k.split(',').map(Number);
+    m = new THREE.Mesh(crackGeo, new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, depthWrite: false }));
+    m.position.set(x + 0.5, y + 0.5, z + 0.5);
+    scene.add(m);
+    cracks.set(k, m);
+  }
+  m.material.opacity = op;
+}
+function clearCrack(k) {
+  const m = cracks.get(k);
+  if (m) { scene.remove(m); m.material.dispose(); cracks.delete(k); }
+}
+function clearCracks() { for (const m of cracks.values()) { scene.remove(m); m.material.dispose(); } cracks.clear(); }
+
+// walls left alone slowly knit back together (this also self-cleans the map + overlays)
 function updateBlockHP(dt) {
   for (const [k, e] of blockHP) {
+    const max = blockToughness(e.id);
+    setCrack(k, 1 - e.hp / max);                     // reflect current damage
     if (e.cd > 0) { e.cd -= dt; continue; }
+    if (blockRegen) e.hp += 24 * dt;                 // dev toggle: walls can be frozen at their current damage
     const [x, y, z] = k.split(',').map(Number);
-    e.hp += 24 * dt;
-    if (getBlock(x, y, z) !== e.id || e.hp >= blockToughness(e.id)) blockHP.delete(k);
+    if (getBlock(x, y, z) !== e.id || (blockRegen && e.hp >= max)) { blockHP.delete(k); clearCrack(k); }
   }
 }
 
@@ -670,7 +698,8 @@ function setBlock(x, y, z, b) {
   const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
   const i = lidx(lx, y, lz), old = c[i];
   c[i] = b;
-  blockHP.delete(x + ',' + y + ',' + z);             // any change resets durability tracking
+  const dk = x + ',' + y + ',' + z;                  // any change resets per-block tracking
+  blockHP.delete(dk); placed.delete(dk); clearCrack(dk);
 
   if (old === TORCH && b !== TORCH) {
     const k = torches.findIndex(t => t.x === x && t.y === y && t.z === z);
@@ -1580,6 +1609,7 @@ function placeBlock(blockId) {
   if (overlap) return;
 
   setBlock(x, y, z, blockId);
+  if (blockId !== CORE) placed.add(x + ',' + y + ',' + z);   // mark it player-built so bombers can target it
   consumeSelected();
 
   if (blockId === CORE) {                    // the run begins
@@ -1720,7 +1750,7 @@ function newRun() {
   seed = Math.random() * 10000;
   resetWorld();
   clearZombies(); clearDrops(); clearProjectiles(); clearTurrets(); clearFX();
-  leafDecay.clear(); blockHP.clear();
+  leafDecay.clear(); blockHP.clear(); placed.clear(); clearCracks();
   unlocked.mountain = false; unlocked.desert = false;
   inv.hotbar.fill(null); inv.bag.fill(null);
   inv.hotbar[0] = { id: CORE, n: 1 };
@@ -1811,16 +1841,23 @@ const ZTYPES = {
             skin: 0x8fa83a, shirt: 0x55663a, pants: 0x3a4528, eye: 0xc8d84a,
             ranged: true, spitEvery: 2.6, spitDmg: 3,
             extraDrop: { id: ARROW, n: 2, p: 0.5 } },
+  bomber: { hp: 26, hpN: 4, dmg: 0, baseDmg: 0, atkCd: 1.0, walk: 1.8, chase: 3.8,
+            digPower: 0, kb: 1.0, drops: [1, 2], scale: [1, 1, 1],
+            skin: 0x9aa84a, shirt: 0x55502a, pants: 0x3a3722, eye: 0xff7a2a,
+            bomber: true, fuseTime: 1.1,
+            extraDrop: { id: SULFUR, n: 1, p: 0.6 } },
 };
 
 function pickZombieType() {
   const bruteP   = nightNum >= 3 ? Math.min(0.25, 0.08 + nightNum * 0.03) : 0;
   const spitterP = nightNum >= 4 ? Math.min(0.18, 0.05 + nightNum * 0.02) : 0;
+  const bomberP  = nightNum >= 5 ? Math.min(0.16, 0.05 + nightNum * 0.015) : 0;
   const runnerP  = nightNum >= 2 ? Math.min(0.32, 0.13 + nightNum * 0.04) : 0;
   const r = Math.random();
   if (r < bruteP) return 'brute';
   if (r < bruteP + spitterP) return 'spitter';
-  if (r < bruteP + spitterP + runnerP) return 'runner';
+  if (r < bruteP + spitterP + bomberP) return 'bomber';
+  if (r < bruteP + spitterP + bomberP + runnerP) return 'runner';
   return 'walker';
 }
 const SHADE6 = [0.72, 0.72, 1.0, 0.5, 0.84, 0.84]; // +x -x +y -y +z -z, matches world lighting
@@ -1970,6 +2007,7 @@ function updateWaves(dt) {
     if (nightNum === 2) text = '\u263E NIGHT 2 \u2014 RUNNERS JOIN THE HORDE';
     if (nightNum === 3) text = '\u263E NIGHT 3 \u2014 BRUTES JOIN THE HORDE';
     if (nightNum === 4) text = '\u263E NIGHT 4 \u2014 SPITTERS JOIN THE HORDE';
+    if (nightNum === 5) text = '\u263E NIGHT 5 \u2014 BOMBERS JOIN THE HORDE';
     showBanner(text, 4);
   }
   if (!night && wasNight) {                       // dawn: wave over, maybe new lands
@@ -2065,10 +2103,40 @@ function updateZombies(dt) {
         speed = z.type.chase;
         z.yaw = Math.atan2(bdx, bdz);
       }
+    } else if (z.type.bomber) {
+      // charge the core and detonate — at your wall if one blocks the way, else at the core
+      if (z.fuse > 0) {
+        z.fuse -= dt;                            // lit: freeze, swell, then blow (mx/mz stay 0)
+        if (z.fuse <= 0) { bomberExplode(z); continue; }
+      } else if (basePos) {
+        const bdx = basePos.x + 0.5 - z.pos.x, bdz = basePos.z + 0.5 - z.pos.z;
+        mx = bdx / (bDist || 1); mz = bdz / (bDist || 1);
+        speed = z.type.chase;
+        z.yaw = Math.atan2(bdx, bdz);
+        // detonate at the core, or the moment a player-built wall blocks the way
+        const bx = Math.floor(z.pos.x + mx * 0.8), bz2 = Math.floor(z.pos.z + mz * 0.8);
+        const wall = placed.has(bx + ',' + Math.floor(z.pos.y + 0.4) + ',' + bz2) ||
+                     placed.has(bx + ',' + Math.floor(z.pos.y + 1.3) + ',' + bz2);
+        if (bDist < 2.6 || (z.bumped && wall)) z.fuse = z.type.fuseTime;
+      } else if (playerNear) {
+        mx = dx / (dist || 1); mz = dz / (dist || 1);
+        speed = z.type.chase;
+        z.yaw = Math.atan2(dx, dz);
+        if (dist < 2.2 || z.bumped) z.fuse = z.type.fuseTime;
+      } else {
+        z.think -= dt;
+        if (z.think <= 0) {
+          z.idle = Math.random() < 0.4;
+          z.wanderDir = Math.random() * Math.PI * 2;
+          z.think = 2 + Math.random() * 3;
+        }
+        if (!z.idle) { mx = Math.sin(z.wanderDir); mz = Math.cos(z.wanderDir); z.yaw = z.wanderDir; }
+      }
     } else if (playerNear) {
       mx = dx / (dist || 1); mz = dz / (dist || 1);
       speed = z.type.chase;
       z.yaw = Math.atan2(dx, dz);
+      z.tgtY = player.pos.y;                   // dig toward the player's height
       if (dist < 1.5 && dy > -1.5 && dy < 2 && z.attackCd <= 0) {
         z.attackCd = z.type.atkCd;
         damagePlayer(z.type.dmg, z.pos);
@@ -2147,10 +2215,18 @@ function updateZombies(dt) {
       z.armR.rotation.x = -Math.PI / 2 - Math.sin(z.walk * 0.7) * 0.12;
     }
 
-    // hurt flash / fire glow / night dimming
+    // hurt flash / fire glow / fuse / night dimming
     if (z.hurt > 0) z.hurt -= dt;
     let tint = 0, tc = C_RED;
-    if (z.hurt > 0) tint = 0.75;
+    if (z.fuse > 0) {                         // lit bomber: fast orange flash as it swells
+      const k = 1 - z.fuse / z.type.fuseTime;
+      tint = 0.35 + 0.5 * Math.abs(Math.sin(performance.now() * 0.03));
+      tc = C_FIRE;
+      z.mesh.scale.setScalar(1 + 0.28 * k);
+    } else if (z.type.bomber) {
+      z.mesh.scale.setScalar(1);             // not lit: hold normal size
+    }
+    if (z.hurt > 0) { tint = 0.75; tc = C_RED; }
     else if (z.burning) { tint = 0.3 + 0.18 * Math.sin(performance.now() * 0.02 + i * 3); tc = C_FIRE; }
     const glow = Math.max(light, torchLightAt(z.pos.x, z.pos.y + 1, z.pos.z) * 0.95);
     for (const m of z.mats) m.color.copy(m.userData.base).lerp(tc, tint).multiplyScalar(glow);
@@ -2329,7 +2405,7 @@ function spawnSpit(z, tp) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18),
     new THREE.MeshBasicMaterial({ color: 0x9ed44a }));
   scene.add(m);
-  projectiles.push({ mesh: m, pos: from, vel: lobVelocity(from, tp, 13, 18), grav: 18, dmg: z.type.spitDmg, friendly: false, life: 5 });
+  projectiles.push({ mesh: m, pos: from, vel: lobVelocity(from, tp, 13, 18), grav: 18, dmg: z.type.spitDmg, blockDmg: 20, friendly: false, life: 5 });
 }
 
 function updateProjectiles(dt) {
@@ -2346,7 +2422,8 @@ function updateProjectiles(dt) {
       p.vel.y -= p.grav * dt * 0.5;
       p.pos.addScaledVector(p.vel, dt * 0.5);
 
-      const b = getBlock(Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z));
+      const bx = Math.floor(p.pos.x), by = Math.floor(p.pos.y), bz = Math.floor(p.pos.z);
+      const b = getBlock(bx, by, bz);
       if (b === CORE) {                            // spit splashes the core; arrows just stop
         if (!p.friendly) damageBase(p.dmg);
         hit = true; break;
@@ -2355,6 +2432,8 @@ function updateProjectiles(dt) {
         if (p.bomb) { explode(p.pos, p.turretBomb ? SAFE_BLAST : undefined); hit = true; break; }
         if (p.arrow && !p.noRecover && Math.random() < 0.6)   // recover some spent arrows
           spawnDrop(p.pos.x, p.pos.y + 0.3, p.pos.z, ARROW, 1);
+        if (p.blockDmg && placed.has(bx + ',' + by + ',' + bz))   // acid spit etches player-built walls
+          damageBlock(bx, by, bz, p.blockDmg);
         hit = true; break;
       }
 
@@ -2580,32 +2659,42 @@ function updateFX(dt) {
 }
 function clearFX() { while (fxs.length) { const f = fxs.pop(); scene.remove(f.mesh); f.mesh.geometry.dispose(); f.mesh.material.dispose(); } }
 
-// turret bombs use this: pure anti-zombie splash — no terrain craters, no friendly fire
-const SAFE_BLAST = { terrain: false, hurtPlayer: false };
+// turret bombs use this: pure anti-zombie splash — no terrain craters, no friendly fire,
+// and a little weaker than a handheld bomb (34) since they fire automatically
+const SAFE_BLAST = { terrain: false, hurtPlayer: false, damage: 22 };
 
 function explode(pos, opts = {}) {
   const breakTerrain = opts.terrain !== false;
   const hurtPlayer   = opts.hurtPlayer !== false;
+  const hurtZombies  = opts.hurtZombies !== false;
+  const dmg          = opts.damage ?? 34;          // peak damage at the center, falls off to the edge
+  const blockDmg     = opts.blockDmg ?? 200;       // HP dealt to blocks at the center (vs their toughness)
+  const placedOnly   = opts.placedOnly === true;   // bombers only chew player-built walls, never the terrain
   spawnBoom(pos);
-  // crater (the core is shielded) — skipped for blasts that spare the terrain
+  // crater (the core is shielded): chip block HP with falloff, so weak blocks vanish but
+  // sturdy ones (brick, stone) survive a blast or two — skipped for blasts that spare terrain
   if (breakTerrain) {
     const R = 2.2;
     for (let x = Math.floor(pos.x - R); x <= Math.floor(pos.x + R); x++)
       for (let y = Math.max(1, Math.floor(pos.y - R)); y <= Math.floor(pos.y + R); y++)
         for (let z = Math.floor(pos.z - R); z <= Math.floor(pos.z + R); z++) {
-          if (Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z) > R) continue;
+          const dd = Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z);
+          if (dd > R) continue;
           const b = getBlock(x, y, z);
           if (b === AIR || b === WATER || b === CORE) continue;
-          setBlock(x, y, z, AIR);
+          if (placedOnly && !placed.has(x + ',' + y + ',' + z)) continue;
+          damageBlock(x, y, z, blockDmg * (1 - dd / R));
         }
   }
-  // zombies: damage + knockback with falloff
-  for (const z of zombies) {
-    if (z.dying) continue;
-    const d = Math.hypot(z.pos.x - pos.x, z.pos.y + z.h * 0.5 - pos.y, z.pos.z - pos.z);
-    if (d < 3.6) {
-      const kx = z.pos.x - pos.x, kz = z.pos.z - pos.z, kl = Math.hypot(kx, kz) || 1;
-      damageZombie(z, Math.ceil(34 * (1 - d / 3.6)), { x: kx / kl * 1.5, y: 0, z: kz / kl * 1.5 });
+  // zombies: damage + knockback with falloff (a bomber's own blast spares its allies)
+  if (hurtZombies) {
+    for (const z of zombies) {
+      if (z.dying) continue;
+      const d = Math.hypot(z.pos.x - pos.x, z.pos.y + z.h * 0.5 - pos.y, z.pos.z - pos.z);
+      if (d < 3.6) {
+        const kx = z.pos.x - pos.x, kz = z.pos.z - pos.z, kl = Math.hypot(kx, kz) || 1;
+        damageZombie(z, Math.ceil(dmg * (1 - d / 3.6)), { x: kx / kl * 1.5, y: 0, z: kz / kl * 1.5 });
+      }
     }
   }
   // careless thrower
@@ -2613,6 +2702,18 @@ function explode(pos, opts = {}) {
     const pd = Math.hypot(player.pos.x - pos.x, player.pos.y + 0.9 - pos.y, player.pos.z - pos.z);
     if (pd < 3.4) damagePlayer(Math.ceil(12 * (1 - pd / 3.4)), pos);
   }
+}
+
+// a bomber detonating: blow open nearby walls, hurt the player, hit the core if it reached it,
+// but leave the rest of the horde intact (so it clears a path instead of nuking its friends)
+function bomberExplode(z) {
+  explode(new THREE.Vector3(z.pos.x, z.pos.y + z.h * 0.5, z.pos.z),
+    { terrain: true, placedOnly: true, hurtPlayer: true, hurtZombies: false });
+  if (basePos) {
+    const bd = Math.hypot(basePos.x + 0.5 - z.pos.x, basePos.z + 0.5 - z.pos.z);
+    if (bd < 4) damageBase(Math.ceil(28 * (1 - bd / 4)));
+  }
+  removeZombie(z);
 }
 
 // a bomb turret's shell: friendly, lobbed, splash-only (no terrain crater, no self-harm)
@@ -2706,6 +2807,7 @@ function toggleInventory() {
 
 // ---------- dev / creative panel ----------
 let creative = false, devOpen = false, mobAggro = true, freezeTime = false;
+let flying = false, baseInvincible = false, blockRegen = true, lastSpaceTap = 0;
 
 // everything you can hand yourself: blocks first, then items/tools
 const GIVE_LIST = [
